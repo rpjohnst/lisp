@@ -259,6 +259,77 @@ value eval(struct interpreter *i, value exp, value env) {
 
 /* repl */
 
+struct token {
+	enum { tok_eof, tok_lparen, tok_rparen, tok_quote, tok_dot, tok_number, tok_symbol } kind;
+	value atom;
+};
+
+struct parser {
+	FILE *file;
+};
+
+void parser_init(struct parser *p, struct interpreter *i, FILE *file) {
+	p->file = file;
+}
+
+struct token token(struct parser *p, struct interpreter *i) {
+	int c;
+	do {
+		c = fgetc(p->file);
+	} while (isspace(c));
+
+	switch (c) {
+	case EOF: return (struct token){ tok_eof, nil };
+	case '(': return (struct token){ tok_lparen, nil };
+	case ')': return (struct token){ tok_rparen, nil };
+	case '\'': return (struct token){ tok_quote, nil };
+	case '.': return (struct token){ tok_dot, nil };
+	}
+
+	char atom[80], *a = atom;
+	do {
+		*a++ = c;
+		c = fgetc(p->file);
+	} while (c != EOF && !isspace(c) && c != '(' && c != ')');
+
+	ungetc(c, p->file);
+	*a = '\0';
+
+	char *end;
+	double num = strtod(atom, &end);
+	if (end == a)
+		return (struct token){ tok_number, mk_number(i, num) };
+	else
+		return (struct token){ tok_symbol, mk_atom(&i->symbols, a - atom, atom) };
+}
+
+value read(struct parser *p, struct interpreter *i, struct token current);
+
+value read_list(struct parser *p, struct interpreter *i) {
+	struct token current = token(p, i);
+
+	if (current.kind == tok_rparen)
+		return nil;
+	else if (current.kind == tok_dot) {
+		value t = read(p, i, token(p, i));
+		assert(token(p, i).kind == tok_rparen);
+		return t;
+	} else {
+		value head = read(p, i, current);
+		value tail = read_list(p, i);
+		return cons(i, head, tail);
+	}
+}
+
+value read(struct parser *p, struct interpreter *i, struct token current) {
+	if (current.kind == tok_lparen)
+		return read_list(p, i);
+	if (current.kind == tok_quote)
+		return list(i, i->quote, read(p, i, token(p, i)));
+
+	return current.atom;
+}
+
 void print(const struct interpreter *i, value exp) {
 	if (atom(i, exp) == i->t) {
 		if (eq(i, exp, nil))
@@ -285,15 +356,22 @@ int main(void) {
 	struct interpreter interp, *i = &interp;
 	interpreter_init(i);
 
-	double three = 3;
+	struct parser parser, *p = &parser;
+	parser_init(p, i, stdin);
 
-	value x = mk_atom(&i->symbols, 3, "foo");
-	value y = mk_atom(&i->symbols, 3, "bar");
-	value z = mk_atom(&i->symbols, 3, "baz");
-	value l = cons(i, x, list(i, x, z));
+	value env = nil;
+	for (;;) {
+		printf("> ");
+		fflush(stdout);
 
-	value env = cons(i, list(i, x, l), nil);
+		struct token current = token(p, i);
+		if (current.kind == tok_eof) {
+			printf("\n");
+			break;
+		}
 
-	print(i, eval(i, list(i, i->atom, list(i, i->quote, x)), env));
-	printf("\n");
+		value exp = read(p, i, current);
+		print(i, eval(i, exp, env));
+		printf("\n");
+	}
 }
