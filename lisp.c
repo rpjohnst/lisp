@@ -89,17 +89,24 @@ struct interpreter {
 	size_t num_capacity;
 	size_t num_size;
 
+	// internals
+	value prim;
+	value proc;
+
+	// builtins
 	value quote;
+	value cond;
+	value lambda;
+
+	value t;
+
+	// primitives
 	value atom;
 	value number;
 	value eq;
 	value car;
 	value cdr;
 	value cons;
-	value cond;
-	value label;
-	value lambda;
-	value t;
 };
 
 void interpreter_init(struct interpreter *i) {
@@ -115,17 +122,20 @@ void interpreter_init(struct interpreter *i) {
 
 #define insert(a) i->a = mk_atom(&i->symbols, strlen(#a), #a)
 #define insert_sym(a, b) i->a = mk_atom(&i->symbols, strlen(b), b)
+	insert_sym(prim, "&prim");
+	insert_sym(proc, "&proc");
 	insert(quote);
+	insert(cond);
+	insert(lambda);
+
+	insert(t);
+
 	insert_sym(atom, "atom?");
 	insert_sym(number, "number?");
 	insert_sym(eq, "eq?");
 	insert(car);
 	insert(cdr);
 	insert(cons);
-	insert(cond);
-	insert(label);
-	insert(lambda);
-	insert(t);
 #undef insert
 #undef insert_sym
 }
@@ -161,6 +171,7 @@ value cadr(value x) { return car(cdr(x)); }
 value cadar(value x) { return car(cdr(car(x))); }
 value caddr(value x) { return car(cdr(cdr(x))); }
 value caddar(value x) { return car(cdr(cdr(car(x)))); }
+value cadddr(value x) { return car(cdr(cdr(cdr(x)))); }
 
 value cons(struct interpreter *i, value a, value d) {
 	assert(i->size < i->capacity);
@@ -216,6 +227,21 @@ value assoc(const struct interpreter *i, value x, value env) {
 
 value eval(struct interpreter *i, value exp, value env);
 
+value apply(struct interpreter *i, value fun, value args, value env) {
+	if (eq(i, car(fun), i->prim) == i->t) {
+		if (eq(i, cadr(fun), i->atom) == i->t) return atom(i, car(args));
+		if (eq(i, cadr(fun), i->eq) == i->t) return eq(i, car(args), cadr(args));
+		if (eq(i, cadr(fun), i->car) == i->t) return car(car(args));
+		if (eq(i, cadr(fun), i->cdr) == i->t) return cdr(car(args));
+		if (eq(i, cadr(fun), i->cons) == i->t) return cons(i, car(args), cadr(args));
+	}
+
+	if (eq(i, car(fun), i->proc) == i->t)
+		return eval(i, cadddr(fun), append(i, pair(i, caddr(fun), args), cadr(fun)));
+
+	assert(0);
+}
+
 value evcond(struct interpreter *i, value c, value env) {
 	if (eval(i, caar(c), env) == i->t) return eval(i, cadar(c), env);
 	return evcond(i, cdr(c), env);
@@ -232,29 +258,11 @@ value eval(struct interpreter *i, value exp, value env) {
 		return assoc(i, exp, env);
 	}
 
-	if (atom(i, car(exp)) == i->t) {
-		if (eq(i, car(exp), i->quote) == i->t) return cadr(exp);
-		if (eq(i, car(exp), i->atom) == i->t) return atom(i, eval(i, cadr(exp), env));
-		if (eq(i, car(exp), i->eq) == i->t)
-			return eq(i, eval(i, cadr(exp), env), eval(i, caddr(exp), env));
-		if (eq(i, car(exp), i->car) == i->t) return car(eval(i, cadr(exp), env));
-		if (eq(i, car(exp), i->cdr) == i->t) return cdr(eval(i, cadr(exp), env));
-		if (eq(i, car(exp), i->cons) == i->t)
-			return cons(i, eval(i, cadr(exp), env), eval(i, caddr(exp), env));
-		if (eq(i, car(exp), i->cond) == i->t) return evcond(i, cdr(exp), env);
+	if (eq(i, car(exp), i->quote) == i->t) return cadr(exp);
+	if (eq(i, car(exp), i->cond) == i->t) return evcond(i, cdr(exp), env);
+	if (eq(i, car(exp), i->lambda) == i->t) return cons(i, i->proc, cons(i, env, cdr(exp)));
 
-		return eval(i, cons(i, assoc(i, car(exp), env), cdr(exp)), env);
-	}
-
-	if (eq(i, caar(exp), i->label) == i->t) {
-		return eval(i, cons(i, caddar(exp), cdr(exp)), cons(i, list(i, exp, car(exp)), env));
-	}
-
-	if (eq(i, caar(exp), i->lambda) == i->t) {
-		return eval(i, caddar(exp), append(i, pair(i, cadar(exp), evlist(i, cdr(exp), env)), env));
-	}
-
-	assert(0);
+	return apply(i, eval(i, car(exp), env), evlist(i, cdr(exp), env), env);
 }
 
 /* repl */
@@ -341,6 +349,8 @@ void print(const struct interpreter *i, value exp) {
 			const struct atom *a = ptr(exp);
 			printf("%.*s", (int)a->length, a->name);
 		}
+	} else if (eq(i, car(exp), i->prim) == i->t || eq(i, car(exp), i->proc) == i->t) {
+		printf("<proc:%zx>", (uintptr_t)ptr(exp));
 	} else {
 		printf("(");
 		for (value v = exp; v != nil; v = cdr(v)) {
@@ -359,7 +369,13 @@ int main(void) {
 	struct parser parser, *p = &parser;
 	parser_init(p, i, stdin);
 
-	value env = nil;
+	value env = cons(i,
+		list(i, i->atom, list(i, i->prim, i->atom)), cons(i,
+		list(i, i->eq, list(i, i->prim, i->eq)), cons(i,
+		list(i, i->car, list(i, i->prim, i->car)), cons(i,
+		list(i, i->cdr, list(i, i->prim, i->cdr)), cons(i,
+		list(i, i->cons, list(i, i->prim, i->cons)), nil)))));
+
 	for (;;) {
 		printf("> ");
 		fflush(stdout);
