@@ -97,6 +97,7 @@ struct interpreter {
 	value quote;
 	value cond;
 	value lambda;
+	value let;
 
 	value t;
 
@@ -127,6 +128,7 @@ void interpreter_init(struct interpreter *i) {
 	insert(quote);
 	insert(cond);
 	insert(lambda);
+	insert(let);
 
 	insert(t);
 
@@ -168,6 +170,7 @@ value cdr(value x) {
 
 value caar(value x) { return car(car(x)); }
 value cadr(value x) { return car(cdr(x)); }
+value cdar(value x) { return cdr(car(x)); }
 value cadar(value x) { return car(cdr(car(x))); }
 value caddr(value x) { return car(cdr(cdr(x))); }
 value caddar(value x) { return car(cdr(cdr(car(x)))); }
@@ -225,6 +228,20 @@ value assoc(const struct interpreter *i, value x, value env) {
 		return assoc(i, x, cdr(env));
 }
 
+value set_car(value x, value y) {
+	assert(tag(x) == t_cons);
+	struct cons *c = ptr(x);
+	c->a = y;
+	return x;
+}
+
+value set_cdr(value x, value y) {
+	assert(tag(x) == t_cons);
+	struct cons *c = ptr(x);
+	c->d = y;
+	return x;
+}
+
 value eval(struct interpreter *i, value exp, value env);
 
 value apply(struct interpreter *i, value fun, value args, value env) {
@@ -247,6 +264,21 @@ value evcond(struct interpreter *i, value c, value env) {
 	return evcond(i, cdr(c), env);
 }
 
+value evlet(struct interpreter *i, value l, value exp, value env) {
+	for (value v = l; v != nil; v = cdr(v))
+		env = cons(i, list(i, caar(v), nil), env);
+
+	value vals = nil;
+	for (value v = l; v != nil; v = cdr(v))
+		vals = cons(i, eval(i, cadar(v), env), vals);
+
+	for (value e = env, v = vals; v != nil; e = cdr(e), v = cdr(v)) {
+		set_car(cdar(e), car(v));
+	}
+
+	return eval(i, exp, env);
+}
+
 value evlist(struct interpreter *i, value m, value env) {
 	if (m == nil) return nil;
 	return cons(i, eval(i, car(m), env), evlist(i, cdr(m), env));
@@ -261,6 +293,7 @@ value eval(struct interpreter *i, value exp, value env) {
 	if (eq(i, car(exp), i->quote) == i->t) return cadr(exp);
 	if (eq(i, car(exp), i->cond) == i->t) return evcond(i, cdr(exp), env);
 	if (eq(i, car(exp), i->lambda) == i->t) return cons(i, i->proc, cons(i, env, cdr(exp)));
+	if (eq(i, car(exp), i->let) == i->t) return evlet(i, cadr(exp), caddr(exp), env);
 
 	return apply(i, eval(i, car(exp), env), evlist(i, cdr(exp), env), env);
 }
