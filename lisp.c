@@ -9,10 +9,10 @@
 /* values */
 
 enum type {
-	t_atom, t_cons, t_number
+	t_atom, t_cons, t_number = 0x7,
 };
 
-typedef uintptr_t value;
+typedef uint64_t value;
 
 struct atom {
 	size_t length;
@@ -24,15 +24,38 @@ struct cons {
 	value d;
 };
 
+value from_atom(const struct atom *atom) {
+	return (uintptr_t)atom | ((uint64_t)t_atom << 48);
+}
+
+value from_cons(const struct cons *c) {
+	return (uintptr_t)c | ((uint64_t)t_cons << 48);
+}
+
+value from_number(double number) {
+	uint64_t bits;
+	memcpy(&bits, &number, sizeof(bits));
+	return bits + ((uint64_t)t_number << 48);
+}
+
 enum type tag(value x) {
-	return x & 0x3;
+	return x >> 48;
 }
 
-void *ptr(value x) {
-	return (void*)(x & ~0x3);
+void *to_ptr(value x) {
+	assert(tag(x) < t_number);
+	return (void*)(x & ~(0xffffL << 48));
 }
 
-const value nil = 0 | t_atom;
+double to_number(value x) {
+	assert(tag(x) >= t_number);
+	uint64_t bits = x - ((uint64_t)t_number << 48);
+	double number;
+	memcpy(&number, &bits, sizeof(bits));
+	return number;
+}
+
+const value nil = 0;
 
 /* symbols */
 
@@ -73,7 +96,7 @@ value mk_atom(struct tree **symbols, size_t length, const char *name) {
 	if (inserted != node)
 		free(node);
 
-	return (uintptr_t)&inserted->atom | t_atom;
+	return from_atom(&inserted->atom);
 }
 
 /* interpreter state */
@@ -84,10 +107,6 @@ struct interpreter {
 	struct cons *heap;
 	size_t capacity;
 	size_t size;
-
-	double *num_heap;
-	size_t num_capacity;
-	size_t num_size;
 
 	// internals
 	value prim;
@@ -108,6 +127,11 @@ struct interpreter {
 	value car;
 	value cdr;
 	value cons;
+
+	value plus;
+	value minus;
+	value mult;
+	value div;
 };
 
 void interpreter_init(struct interpreter *i) {
@@ -117,14 +141,11 @@ void interpreter_init(struct interpreter *i) {
 	i->capacity = 512;
 	i->size = 0;
 
-	i->num_heap = malloc(512 * sizeof(*i->num_heap));
-	i->num_capacity = 512;
-	i->num_size = 0;
-
 #define insert(a) i->a = mk_atom(&i->symbols, strlen(#a), #a)
 #define insert_sym(a, b) i->a = mk_atom(&i->symbols, strlen(b), b)
 	insert_sym(prim, "&prim");
 	insert_sym(proc, "&proc");
+
 	insert(quote);
 	insert(cond);
 	insert(lambda);
@@ -138,6 +159,11 @@ void interpreter_init(struct interpreter *i) {
 	insert(car);
 	insert(cdr);
 	insert(cons);
+
+	insert_sym(plus, "+");
+	insert_sym(minus, "-");
+	insert_sym(mult, "*");
+	insert_sym(div, "/");
 #undef insert
 #undef insert_sym
 }
@@ -145,26 +171,28 @@ void interpreter_init(struct interpreter *i) {
 /* built-ins */
 
 value atom(const struct interpreter *i, value x) {
-	return tag(x) == t_atom || tag(x) == t_number ? i->t : nil;
+	return tag(x) == t_atom || tag(x) >= t_number ? i->t : nil;
 }
 
 value number(const struct interpreter *i, value x) {
-	return tag(x) == t_number ? i->t : nil;
+	return tag(x) >= t_number ? i->t : nil;
 }
 
 value eq(const struct interpreter *i, value x, value y) {
+	if (tag(x) >= t_number && tag(y) >= t_number)
+		return to_number(x) == to_number(y) ? i->t : nil;
 	return x == y ? i->t : nil;
 }
 
 value car(value x) {
 	assert(tag(x) == t_cons);
-	const struct cons *c = ptr(x);
+	const struct cons *c = to_ptr(x);
 	return c->a;
 }
 
 value cdr(value x) {
 	assert(tag(x) == t_cons);
-	const struct cons *c = ptr(x);
+	const struct cons *c = to_ptr(x);
 	return c->d;
 }
 
@@ -185,18 +213,7 @@ value cons(struct interpreter *i, value a, value d) {
 	cell->a = a;
 	cell->d = d;
 
-	return (uintptr_t)cell | t_cons;
-}
-
-value mk_number(struct interpreter *i, double n) {
-	assert(i->num_size < i->num_capacity);
-
-	double *c = &i->num_heap[i->num_size];
-	i->num_size++;
-
-	*c = n;
-
-	return (uintptr_t)c | t_number;
+	return from_cell(cell);
 }
 
 /* interpreter */
@@ -251,6 +268,15 @@ value apply(struct interpreter *i, value fun, value args, value env) {
 		if (eq(i, cadr(fun), i->car) == i->t) return car(car(args));
 		if (eq(i, cadr(fun), i->cdr) == i->t) return cdr(car(args));
 		if (eq(i, cadr(fun), i->cons) == i->t) return cons(i, car(args), cadr(args));
+
+		if (eq(i, cadr(fun), i->plus) == i->t)
+			return from_number(to_number(car(args)) + to_number(cadr(args)));
+		if (eq(i, cadr(fun), i->minus) == i->t)
+			return from_number(to_number(car(args)) - to_number(cadr(args)));
+		if (eq(i, cadr(fun), i->mult) == i->t)
+			return from_number(to_number(car(args)) * to_number(cadr(args)));
+		if (eq(i, cadr(fun), i->div) == i->t)
+			return from_number(to_number(car(args)) / to_number(cadr(args)));
 	}
 
 	if (eq(i, car(fun), i->proc) == i->t)
@@ -286,7 +312,7 @@ value evlist(struct interpreter *i, value m, value env) {
 
 value eval(struct interpreter *i, value exp, value env) {
 	if (atom(i, exp) == i->t) {
-		if (number(i, exp)) return exp;
+		if (number(i, exp) == i->t) return exp;
 		return assoc(i, exp, env);
 	}
 
@@ -339,7 +365,7 @@ struct token token(struct parser *p, struct interpreter *i) {
 	char *end;
 	double num = strtod(atom, &end);
 	if (end == a)
-		return (struct token){ tok_number, mk_number(i, num) };
+		return (struct token){ tok_number, from_number(num) };
 	else
 		return (struct token){ tok_symbol, mk_atom(&i->symbols, a - atom, atom) };
 }
@@ -376,14 +402,13 @@ void print(const struct interpreter *i, value exp) {
 		if (eq(i, exp, nil))
 			printf("()");
 		else if (number(i, exp)) {
-			const double *n = ptr(exp);
-			printf("%f", *n);
+			printf("%f", to_number(exp));
 		} else {
-			const struct atom *a = ptr(exp);
+			const struct atom *a = to_ptr(exp);
 			printf("%.*s", (int)a->length, a->name);
 		}
 	} else if (eq(i, car(exp), i->prim) == i->t || eq(i, car(exp), i->proc) == i->t) {
-		printf("<proc:%zx>", (uintptr_t)ptr(exp));
+		printf("<proc:%zx>", (uintptr_t)to_ptr(exp));
 	} else {
 		printf("(");
 		for (value v = exp; v != nil; v = cdr(v)) {
@@ -407,7 +432,11 @@ int main(void) {
 		list(i, i->eq, list(i, i->prim, i->eq)), cons(i,
 		list(i, i->car, list(i, i->prim, i->car)), cons(i,
 		list(i, i->cdr, list(i, i->prim, i->cdr)), cons(i,
-		list(i, i->cons, list(i, i->prim, i->cons)), nil)))));
+		list(i, i->cons, list(i, i->prim, i->cons)), cons(i,
+		list(i, i->plus, list(i, i->prim, i->plus)), cons(i,
+		list(i, i->minus, list(i, i->prim, i->minus)), cons(i,
+		list(i, i->mult, list(i, i->prim, i->mult)), cons(i,
+		list(i, i->div, list(i, i->prim, i->div)), nil)))))))));
 
 	for (;;) {
 		printf("> ");
